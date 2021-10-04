@@ -1,0 +1,350 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Orion v4.11.67
+Parameters:
+  VPC:
+    Description: VPC ID
+    Type: AWS::EC2::VPC::Id
+  Subnet:
+    Description: Subnet ID
+    Type: AWS::EC2::Subnet::Id
+  KeyName:
+    Description: Key Pair to be able to log into EC2 instance
+    Type: AWS::EC2::KeyPair::KeyName
+  SSHLocation:
+    Description: Specify permitted inbound network address range for SSH access to
+      the Orion Master and Workers. Use 0.0.0.0/0 for SSH access from all IP addresses. Use
+      x.x.x.x/32 to restrict to a specific IP address, or specify other valid CIDR
+      range.
+    Type: String
+    MinLength: '9'
+    MaxLength: '18'
+    AllowedPattern: "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})"
+    ConstraintDescription: Please specify a valid CIDR range of the form x.x.x.x/x.
+  InstanceType:
+    Description: Instance Type of EC2 instance
+    Type: String
+    Default: t2.xlarge
+    AllowedValues:
+    - t2.xlarge
+    - t2.2xlarge
+    - t3.xlarge
+    - t3.2xlarge
+    - m4.xlarge
+    - m4.2xlarge
+    - m5.xlarge
+    - m5.2xlarge
+    - m5d.xlarge
+    - m5d.2xlarge
+  DatabaseInstanceClass:
+    Description: The database instance type
+    Type: String
+    Default: db.t3.xlarge
+    AllowedValues:
+    - db.t3.xlarge
+    - db.m6g.xlarge
+  DbUser:
+    Description: "Master username for MySQL connection, please make sure to keep a note of this for configuring application"
+    Type: String
+  DbPass:
+    Description: "Password for MySQL connection, please make sure to keep a note of this for configuring application. It should be less than 8 characters"
+    NoEcho: true
+    Type: String
+Mappings:
+  RegionMap:
+    us-east-1:
+      AMIMaster: ami-00229a2f6fc4acef6
+      AMIWorker: ami-03b5bbeb7d06bda45
+Resources:
+  Master:
+    Type: AWS::EC2::Instance
+    DependsOn:
+    - EFSMountTarget
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          default:
+          - setup
+        setup:
+          packages:
+            yum:
+              nfs-utils: []
+          commands:
+            a_createdir:
+              command: mkdir /efsdata
+            b_mount:
+              command:
+                Fn::Join:
+                - ''
+                - - "echo \"$(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone)."
+                  - Ref: EFSFileSystem
+                  - ".efs."
+                  - Ref: AWS::Region
+                  - ".amazonaws.com:/    /efsdata    nfs4    defaults\" >> /etc/fstab"
+            c_permissions:
+              command: mount -a
+            d_permissions:
+              command: chown -R ec2-user:ec2-user /efsdata
+    Properties:
+      ImageId:
+        Fn::FindInMap:
+        - RegionMap
+        - Ref: AWS::Region
+        - AMIMaster
+      InstanceType:
+        Ref: InstanceType
+      KeyName:
+        Ref: KeyName
+      SecurityGroupIds:
+      - Ref: EC2SecurityGroup
+      - Ref: ClusterSecurityGroup
+      SubnetId:
+        Ref: Subnet
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+          - ''
+          - - "#!/bin/bash -xe\n"
+            - "/opt/aws/bin/cfn-init -v --stack "
+            - Ref: AWS::StackName
+            - " --configsets default --resource Master --region "
+            - Ref: AWS::Region
+            - "\n"
+      Tags:
+      - Key: Name
+        Value: 'Master'
+  WorkerVM1:
+    Type: AWS::EC2::Instance
+    DependsOn:
+    - EFSMountTarget
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          default:
+          - setup
+        setup:
+          packages:
+            yum:
+              nfs-utils: []
+          commands:
+            a_createdir:
+              command: mkdir /efsdata
+            b_mount:
+              command:
+                Fn::Join:
+                - ''
+                - - "echo \"$(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone)."
+                  - Ref: EFSFileSystem
+                  - ".efs."
+                  - Ref: AWS::Region
+                  - ".amazonaws.com:/    /efsdata    nfs4    defaults\" >> /etc/fstab"
+            c_permissions:
+              command: mount -a
+            d_permissions:
+              command: chown -R ec2-user:ec2-user /efsdata
+    Properties:
+      ImageId:
+        Fn::FindInMap:
+        - RegionMap
+        - Ref: AWS::Region
+        - AMIWorker
+      InstanceType:
+        Ref: InstanceType
+      KeyName:
+        Ref: KeyName
+      SecurityGroupIds:
+      - Ref: EC2SecurityGroup
+      - Ref: ClusterSecurityGroup
+      SubnetId:
+        Ref: Subnet
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+          - ''
+          - - "#!/bin/bash -xe\n"
+            - "/opt/aws/bin/cfn-init -v --stack "
+            - Ref: AWS::StackName
+            - " --configsets default --resource WorkerVM1 --region "
+            - Ref: AWS::Region
+            - "\n"
+      Tags:
+      - Key: Name
+        Value: 'WorkerVM1'
+  OrionEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref Master
+  EFSFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: Yes
+      FileSystemTags:
+      - Key: Name
+        Value:
+          Ref: AWS::StackName
+  EFSMountTarget:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId:
+        Ref: EFSFileSystem
+      SubnetId:
+        Ref: Subnet
+      SecurityGroups:
+      - Ref: EFSSecurityGroup
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allowing access to EFS
+      VpcId:
+        Ref: VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 2049
+        ToPort: 2049
+        SourceSecurityGroupId:
+          Ref: EC2SecurityGroup
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 2049
+        ToPort: 2049
+        DestinationSecurityGroupId:
+          Ref: EC2SecurityGroup
+  ClusterSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allowing cluster setup
+      VpcId:
+        Ref: VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 7946
+        ToPort: 7946
+        SourceSecurityGroupId:
+          Ref: EC2SecurityGroup
+      - IpProtocol: udp
+        FromPort: 4789
+        ToPort: 4789
+        SourceSecurityGroupId:
+          Ref: EC2SecurityGroup
+      - IpProtocol: udp
+        FromPort: 7946
+        ToPort: 7946
+        SourceSecurityGroupId:
+          Ref: EC2SecurityGroup
+      - IpProtocol: tcp
+        FromPort: 2376
+        ToPort: 2376
+        SourceSecurityGroupId:
+          Ref: EC2SecurityGroup
+      - IpProtocol: tcp
+        FromPort: 2377
+        ToPort: 2377
+        SourceSecurityGroupId:
+          Ref: EC2SecurityGroup
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 7946
+        ToPort: 7946
+        DestinationSecurityGroupId:
+          Ref: EC2SecurityGroup
+      - IpProtocol: udp
+        FromPort: 4789
+        ToPort: 4789
+        DestinationSecurityGroupId:
+          Ref: EC2SecurityGroup
+      - IpProtocol: udp
+        FromPort: 7946
+        ToPort: 7946
+        DestinationSecurityGroupId:
+          Ref: EC2SecurityGroup
+      - IpProtocol: tcp
+        FromPort: 2376
+        ToPort: 2376
+        DestinationSecurityGroupId:
+          Ref: EC2SecurityGroup
+      - IpProtocol: tcp
+        FromPort: 2377
+        ToPort: 2377
+        DestinationSecurityGroupId:
+          Ref: EC2SecurityGroup
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Orion Security Group
+      SecurityGroupIngress:    
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: http 
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: https 
+        - Description: ssh
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SSHLocation
+      SecurityGroupEgress:    
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: http 
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: https 
+        - IpProtocol: tcp
+          Description: nfs
+          FromPort: 2049
+          ToPort: 2049
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          Description: mysql
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: 0.0.0.0/0
+        - Description: ssh
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SSHLocation
+      VpcId: !Ref VPC 
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: RDS Security Group for Orion
+      SecurityGroupIngress:    
+       - IpProtocol: tcp
+         FromPort: 3306
+         ToPort: 3306
+         SourceSecurityGroupId:
+           Ref: EC2SecurityGroup
+      SecurityGroupEgress:    
+       - IpProtocol: tcp
+         FromPort: 3306
+         ToPort: 3306
+         DestinationSecurityGroupId:
+           Ref: EC2SecurityGroup
+      VpcId: !Ref VPC 
+  SQLDbInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: "openskye"
+      MasterUsername: !Ref DbUser
+      MasterUserPassword: !Ref DbPass
+      StorageEncrypted: Yes
+      Engine: MySQL
+      EngineVersion: 8.0.23    
+      DBInstanceClass:
+        Ref: DatabaseInstanceClass
+      VPCSecurityGroups:
+       -  Ref: RDSSecurityGroup
+      PubliclyAccessible: False
+      StorageType: gp2
+      AllocatedStorage: "100"
+      DBInstanceIdentifier: !Join ["-", [  "OrionMySqlDbInstance", !Ref "AWS::StackName",  !Ref "AWS::Region",  ]]
